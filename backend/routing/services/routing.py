@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import flexpolyline
 
 from . import geo
-from .here import ProviderError
+from .errors import ProviderError
 
 LB_PER_KG = 2.20462
 # Typical empty tractor-trailer weight; HERE wants gross (truck + load) weight.

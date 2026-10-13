@@ -4,7 +4,7 @@ import flexpolyline
 import pytest
 
 from routing.services import geo
-from routing.services.here import ProviderError
+from routing.services.errors import ProviderError
 from routing.services.routing import (
     Route,
     corridor_cells,

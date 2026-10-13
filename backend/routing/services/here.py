@@ -7,15 +7,13 @@ import requests
 from django.conf import settings
 from django.core.cache import cache
 
+from .errors import ProviderError
+
 GEOCODE_URL = "https://geocode.search.hereapi.com/v1/geocode"
 ROUTES_URL = "https://router.hereapi.com/v8/routes"
 
 GEOCODE_CACHE_SECONDS = 24 * 3600
 ROUTES_CACHE_SECONDS = 15 * 60
-
-
-class ProviderError(Exception):
-    """A third-party API failed or returned no usable result. The message is user-facing."""
 
 
 class HereClient:
