@@ -5,7 +5,7 @@ from datetime import timedelta
 
 from .risk import RiskLevel, classify
 from .sampling import place_checkpoints
-from .weather import cell_of
+from .weather import snap
 
 UNKNOWN = "Unknown"
 LEVEL_LABELS = [level.label for level in RiskLevel] + [UNKNOWN]
@@ -56,15 +56,15 @@ def summarize(route, results):
 def assess_routes(routes, departure, load_lb, interval_mi, weather_client):
     """Checkpoints, forecast-at-ETA and risk for every route, in one batched weather fetch."""
     checkpoints_by_route = [place_checkpoints(route, departure, interval_mi) for route in routes]
-    cells = [cell_of(cp.lat, cp.lon) for cps in checkpoints_by_route for cp in cps]
+    points = [snap(cp.lat, cp.lon) for cps in checkpoints_by_route for cp in cps]
     latest_arrival = departure + timedelta(seconds=max(route.duration_s for route in routes))
-    series_by_cell = weather_client.series(cells, departure, latest_arrival)
+    series_by_point = weather_client.series(points, departure, latest_arrival)
 
     assessments = []
     for route, checkpoints in zip(routes, checkpoints_by_route):
         results = []
         for cp in checkpoints:
-            series = series_by_cell.get(cell_of(cp.lat, cp.lon))
+            series = series_by_point.get(snap(cp.lat, cp.lon))
             conditions = series.at(cp.eta) if series else None
             risk = (
                 classify(conditions.wind_mph, conditions.rain_in_hr, conditions.snow_in_hr, load_lb)

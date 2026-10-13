@@ -1,10 +1,11 @@
 """Hourly forecasts from Open-Meteo, looked up at the time the truck arrives.
 
-Locations are snapped to a 0.1 degree grid (about the forecast models' own
-resolution), so nearby checkpoints on different routes share one forecast.
+Callers snap locations to a grid (0.1 degree is about the forecast models' own
+resolution), so nearby points on different routes share one cached forecast.
 """
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -17,16 +18,17 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 HOURLY_VARIABLES = ("wind_speed_10m", "wind_gusts_10m", "rain", "snowfall")
 CELL_DEG = 0.1
 BATCH_SIZE = 100
+PARALLEL_REQUESTS = 4
 CACHE_SECONDS = 3600
 FORECAST_HORIZON_DAYS = 15  # Open-Meteo serves 16 days including today
+# Every fetch covers at least this long after its start, so route checkpoints and
+# the 48 hour heatmap for the same departure share cache entries.
+MIN_WINDOW = timedelta(hours=48)
 
 
-def cell_of(lat, lon):
-    return (round(lat / CELL_DEG), round(lon / CELL_DEG))
-
-
-def cell_center(cell):
-    return (cell[0] * CELL_DEG, cell[1] * CELL_DEG)
+def snap(lat, lon, cell_deg=CELL_DEG):
+    """Centre of the grid cell containing (lat, lon). Equal inputs give equal keys."""
+    return (round(round(lat / cell_deg) * cell_deg, 4), round(round(lon / cell_deg) * cell_deg, 4))
 
 
 @dataclass(frozen=True)
@@ -93,43 +95,45 @@ class OpenMeteoClient:
         self.session = session or requests.Session()
         self.timeout = timeout
 
-    def series(self, cells, start, end, today=None):
-        """Hourly series covering [start, end] for each grid cell.
+    def series(self, points, start, end, today=None):
+        """Hourly series covering [start, end] for each snapped (lat, lon) point.
 
-        Cells whose window lies beyond the forecast horizon are left out, and
+        Points whose window lies beyond the forecast horizon are left out, and
         callers treat them as unknown weather.
         """
         today = today or datetime.now(timezone.utc).date()
         horizon = today + timedelta(days=FORECAST_HORIZON_DAYS)
+        end = max(end, start + MIN_WINDOW)
         start_date = start.astimezone(timezone.utc).date()
         end_date = min(end.astimezone(timezone.utc).date(), horizon)
         if start_date > horizon:
             return {}
 
         found, missing = {}, []
-        for cell in dict.fromkeys(cells):
-            cached = cache.get(self._cache_key(cell, start_date, end_date))
+        for point in dict.fromkeys(points):
+            cached = cache.get(self._cache_key(point, start_date, end_date))
             if cached is None:
-                missing.append(cell)
+                missing.append(point)
             else:
-                found[cell] = cached
+                found[point] = cached
 
-        for i in range(0, len(missing), BATCH_SIZE):
-            batch = missing[i : i + BATCH_SIZE]
-            for cell, series in zip(batch, self._fetch(batch, start_date, end_date)):
-                cache.set(self._cache_key(cell, start_date, end_date), series, CACHE_SECONDS)
-                found[cell] = series
+        batches = [missing[i : i + BATCH_SIZE] for i in range(0, len(missing), BATCH_SIZE)]
+        with ThreadPoolExecutor(max_workers=PARALLEL_REQUESTS) as pool:
+            fetched = pool.map(lambda batch: self._fetch(batch, start_date, end_date), batches)
+            for batch, results in zip(batches, fetched):
+                for point, series in zip(batch, results):
+                    cache.set(self._cache_key(point, start_date, end_date), series, CACHE_SECONDS)
+                    found[point] = series
         return found
 
     @staticmethod
-    def _cache_key(cell, start_date, end_date):
-        return f"om:{cell[0]}:{cell[1]}:{start_date}:{end_date}"
+    def _cache_key(point, start_date, end_date):
+        return f"om:{point[0]:.4f}:{point[1]:.4f}:{start_date}:{end_date}"
 
-    def _fetch(self, cells, start_date, end_date):
-        centers = [cell_center(c) for c in cells]
+    def _fetch(self, points, start_date, end_date):
         params = {
-            "latitude": ",".join(f"{lat:.1f}" for lat, _ in centers),
-            "longitude": ",".join(f"{lon:.1f}" for _, lon in centers),
+            "latitude": ",".join(f"{lat:.4f}" for lat, _ in points),
+            "longitude": ",".join(f"{lon:.4f}" for _, lon in points),
             "hourly": ",".join(HOURLY_VARIABLES),
             "wind_speed_unit": "mph",
             "precipitation_unit": "inch",
@@ -141,6 +145,8 @@ class OpenMeteoClient:
             response = self.session.get(FORECAST_URL, params=params, timeout=self.timeout)
         except requests.RequestException as exc:
             raise ProviderError(f"Could not reach Open-Meteo: {exc.__class__.__name__}") from exc
+        if response.status_code == 429:
+            raise ProviderError("The weather service is busy (rate limit reached). Try again in a minute.")
         if not response.ok:
             try:
                 detail = response.json().get("reason", "")

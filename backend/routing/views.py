@@ -2,9 +2,10 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .serializers import PlanRequestSerializer, route_name, serialize_route
+from .serializers import HeatmapRequestSerializer, PlanRequestSerializer, route_name, serialize_route
 from .services.assessment import assess_routes
 from .services.errors import ProviderError
+from .services.heatmap import build_heatmap
 from .services.here import HereClient
 from .services.recommend import recommend
 from .services.routing import plan_routes
@@ -80,3 +81,15 @@ def plan(request):
             },
         }
     )
+
+
+@api_view(["POST"])
+def heatmap(request):
+    params = HeatmapRequestSerializer(data=request.data)
+    params.is_valid(raise_exception=True)
+    data = params.validated_data
+    try:
+        grid = build_heatmap(data["routes"], data["departure"], data["load_lb"], OpenMeteoClient())
+    except ProviderError as exc:
+        return provider_error(exc)
+    return Response(grid)

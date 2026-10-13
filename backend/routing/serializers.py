@@ -8,6 +8,7 @@ from .services.sampling import SAMPLING_INTERVALS_MI
 MAX_LOAD_LB = 80_000
 MAX_DEPARTURE_AHEAD = timedelta(days=14)
 DEPARTURE_GRACE = timedelta(hours=1)
+MAX_POLYLINE_POINTS = 5000
 # About 30 m: invisible at map zoom levels, cuts route payloads roughly tenfold.
 GEOMETRY_TOLERANCE_DEG = 0.0003
 
@@ -31,12 +32,9 @@ class PlaceField(serializers.Field):
         raise serializers.ValidationError("Expected a place name or {lat, lon}.")
 
 
-class PlanRequestSerializer(serializers.Serializer):
-    origin = PlaceField()
-    destination = PlaceField()
+class TripSerializer(serializers.Serializer):
     departure = serializers.DateTimeField()
     load_lb = serializers.FloatField(min_value=0, max_value=MAX_LOAD_LB)
-    interval_mi = serializers.ChoiceField(choices=SAMPLING_INTERVALS_MI, default=25)
 
     def validate_departure(self, value):
         now = datetime.now(timezone.utc)
@@ -45,6 +43,31 @@ class PlanRequestSerializer(serializers.Serializer):
         if value > now + MAX_DEPARTURE_AHEAD:
             raise serializers.ValidationError("Departure must be within 14 days (forecast range).")
         return value.astimezone(timezone.utc)
+
+
+class PlanRequestSerializer(TripSerializer):
+    origin = PlaceField()
+    destination = PlaceField()
+    interval_mi = serializers.ChoiceField(choices=SAMPLING_INTERVALS_MI, default=25)
+
+
+class PolylineField(serializers.Field):
+    """[[lat, lon, ...], ...]; extra values per point (like elapsed seconds) are ignored."""
+
+    def to_internal_value(self, data):
+        if not isinstance(data, list) or not 2 <= len(data) <= MAX_POLYLINE_POINTS:
+            raise serializers.ValidationError(f"Expected 2 to {MAX_POLYLINE_POINTS} points.")
+        try:
+            points = [(float(p[0]), float(p[1])) for p in data]
+        except (TypeError, ValueError, IndexError):
+            raise serializers.ValidationError("Each point must be [lat, lon].")
+        if not all(-90 <= lat <= 90 and -180 <= lon <= 180 for lat, lon in points):
+            raise serializers.ValidationError("Coordinates out of range.")
+        return points
+
+
+class HeatmapRequestSerializer(TripSerializer):
+    routes = serializers.ListField(child=PolylineField(), min_length=1, max_length=3)
 
 
 def route_name(index):

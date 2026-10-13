@@ -8,7 +8,7 @@ from routing.services.assessment import UNKNOWN, assess_routes
 from routing.services.errors import ProviderError
 from routing.services.routing import Route
 from routing.services.sampling import checkpoint_miles, place_checkpoints
-from routing.services.weather import HourlySeries, OpenMeteoClient, cell_of
+from routing.services.weather import HourlySeries, OpenMeteoClient
 
 DEPARTURE = datetime(2026, 10, 14, 8, tzinfo=timezone.utc)
 MIDNIGHT = datetime(2026, 10, 14, tzinfo=timezone.utc)
@@ -127,13 +127,13 @@ def test_client_batches_dedupes_and_caches(monkeypatch):
     monkeypatch.setattr("routing.services.weather.BATCH_SIZE", 2)
     session = FakeSession()
     client = OpenMeteoClient(session=session)
-    cells = [(1, 1), (2, 2), (1, 1), (3, 3)]
-    result = client.series(cells, DEPARTURE, DEPARTURE, today=date(2026, 10, 13))
-    assert set(result) == {(1, 1), (2, 2), (3, 3)}
-    assert len(session.requests) == 2  # 3 unique cells in batches of 2
+    points = [(1.0, 1.0), (2.0, 2.0), (1.0, 1.0), (3.0, 3.0)]
+    result = client.series(points, DEPARTURE, DEPARTURE, today=date(2026, 10, 13))
+    assert set(result) == {(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)}
+    assert len(session.requests) == 2  # 3 unique points in batches of 2
     assert session.requests[0]["start_date"] == "2026-10-14"
 
-    client.series(cells, DEPARTURE, DEPARTURE, today=date(2026, 10, 13))
+    client.series(points, DEPARTURE, DEPARTURE, today=date(2026, 10, 13))
     assert len(session.requests) == 2  # served from cache
 
 
@@ -141,17 +141,24 @@ def test_client_clamps_to_forecast_horizon():
     session = FakeSession()
     client = OpenMeteoClient(session=session)
     today = date(2026, 10, 1)
-    client.series([(1, 1)], datetime(2026, 10, 15, tzinfo=timezone.utc),
+    client.series([(1.0, 1.0)], datetime(2026, 10, 15, tzinfo=timezone.utc),
                   datetime(2026, 10, 20, tzinfo=timezone.utc), today=today)
     assert session.requests[0]["end_date"] == "2026-10-16"
-    assert client.series([(2, 2)], datetime(2026, 10, 17, tzinfo=timezone.utc),
+    assert client.series([(2.0, 2.0)], datetime(2026, 10, 17, tzinfo=timezone.utc),
                          datetime(2026, 10, 18, tzinfo=timezone.utc), today=today) == {}
 
 
-def test_client_raises_provider_error_on_failure():
-    client = OpenMeteoClient(session=FakeSession(status=429))
-    with pytest.raises(ProviderError):
-        client.series([(1, 1)], DEPARTURE, DEPARTURE, today=date(2026, 10, 13))
+@pytest.mark.parametrize("status, message", [(429, "rate limit"), (500, "(500)")])
+def test_client_raises_provider_error_on_failure(status, message):
+    client = OpenMeteoClient(session=FakeSession(status=status))
+    with pytest.raises(ProviderError, match=message):
+        client.series([(1.0, 1.0)], DEPARTURE, DEPARTURE, today=date(2026, 10, 13))
+
+
+def test_client_fetches_at_least_48_hours():
+    session = FakeSession()
+    OpenMeteoClient(session=session).series([(1.0, 1.0)], DEPARTURE, DEPARTURE, today=date(2026, 10, 13))
+    assert session.requests[0]["end_date"] == "2026-10-16"
 
 
 # --- assess_routes ---------------------------------------------------------------
@@ -163,14 +170,13 @@ class FakeWeather:
     def __init__(self, unknown_beyond_lon=None):
         self.unknown_beyond_lon = unknown_beyond_lon
 
-    def series(self, cells, start, end):
+    def series(self, points, start, end):
         result = {}
-        for cell in cells:
-            lon = cell[1] / 10
+        for lat, lon in points:
             if self.unknown_beyond_lon is not None and lon > self.unknown_beyond_lon:
                 continue
             wind = 20 if lon < 0.5 else 50  # Low, then Severe
-            result[cell] = make_series(wind=[wind] * 48)
+            result[(lat, lon)] = make_series(wind=[wind] * 48)
         return result
 
 

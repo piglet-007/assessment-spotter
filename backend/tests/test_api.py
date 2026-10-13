@@ -32,12 +32,12 @@ class FakeWeather:
     def __init__(self, wind_by_lat):
         self.wind_by_lat = wind_by_lat
 
-    def series(self, cells, start, end):
+    def series(self, points, start, end):
         midnight = start.replace(hour=0, minute=0, second=0, microsecond=0)
         result = {}
-        for cell in cells:
-            wind = self.wind_by_lat.get(round(cell[0] / 10), 0)
-            result[cell] = HourlySeries(midnight, (wind,) * 72, (wind,) * 72, (0.0,) * 72, (0.0,) * 72)
+        for point in points:
+            wind = self.wind_by_lat.get(round(point[0]), 0)
+            result[point] = HourlySeries(midnight, (wind,) * 72, (wind,) * 72, (0.0,) * 72, (0.0,) * 72)
         return result
 
 
