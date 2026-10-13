@@ -18,6 +18,19 @@ const FIRST_LABEL_LAYER = 'waterway_line_label'
 const FONT = ['Noto Sans Bold']
 const EMPTY: FeatureCollection = { type: 'FeatureCollection', features: [] }
 
+const NO_WEBGL_MESSAGE =
+  'The map needs WebGL2, which this browser has turned off or does not support. ' +
+  'Enable hardware acceleration in your browser settings (or try another browser) and reload. ' +
+  'Route results in the sidebar still work.'
+
+function hasWebGL2(): boolean {
+  try {
+    return !!document.createElement('canvas').getContext('webgl2')
+  } catch {
+    return false
+  }
+}
+
 /** Radius of each heatmap point in grid cells; see heatmapIntensity. */
 const HEAT_RADIUS_CELLS = 2
 
@@ -265,6 +278,7 @@ export default function MapView({ plan, selectedId, onSelectRoute, focus, heatma
   const popupRef = useRef<maplibregl.Popup | null>(null)
   const showPopupRef = useRef<(routeId: string, index: number, at: maplibregl.LngLatLike) => void>(() => {})
   const [ready, setReady] = useState(false)
+  const [mapError, setMapError] = useState<string | null>(() => (hasWebGL2() ? null : NO_WEBGL_MESSAGE))
 
   // Handlers registered once on the map read the latest props through refs.
   const planRef = useRef(plan)
@@ -283,13 +297,23 @@ export default function MapView({ plan, selectedId, onSelectRoute, focus, heatma
 
   // Create the map once.
   useEffect(() => {
-    const map = new maplibregl.Map({
-      container: containerRef.current!,
-      style: STYLE_URL,
-      center: [-98.5, 39.5],
-      zoom: 3.3,
-      attributionControl: { compact: true },
-    })
+    if (mapError) return
+    let map: maplibregl.Map
+    try {
+      map = new maplibregl.Map({
+        container: containerRef.current!,
+        style: STYLE_URL,
+        center: [-98.5, 39.5],
+        zoom: 3.3,
+        attributionControl: { compact: true },
+      })
+    } catch {
+      // WebGL can pass the support check yet still fail to start (e.g. a blocklisted GPU).
+      // Reporting an external library's failure is a legitimate effect state update.
+      // oxlint-disable-next-line react/set-state-in-effect
+      setMapError(NO_WEBGL_MESSAGE)
+      return
+    }
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
     map.on('load', () => {
       addLayers(map)
@@ -329,7 +353,7 @@ export default function MapView({ plan, selectedId, onSelectRoute, focus, heatma
       mapRef.current = null
       setReady(false)
     }
-  }, [])
+  }, [mapError])
 
   // New plan: replace route data and frame it.
   useEffect(() => {
@@ -423,5 +447,15 @@ export default function MapView({ plan, selectedId, onSelectRoute, focus, heatma
     setData(map, 'trucks', featureCollection(trucks))
   }, [ready, plan, routeAxes, hour])
 
-  return <div ref={containerRef} className="map" />
+  return (
+    <>
+      <div ref={containerRef} className="map" />
+      {mapError && (
+        <div className="map-error" role="alert">
+          <strong>Map unavailable</strong>
+          <p>{mapError}</p>
+        </div>
+      )}
+    </>
+  )
 }

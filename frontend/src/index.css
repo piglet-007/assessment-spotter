@@ -451,6 +451,24 @@ button.primary:disabled {
   box-shadow: var(--shadow);
 }
 
+.map-error {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(420px, calc(100% - 32px));
+  padding: 16px 18px;
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  border-left: 4px solid var(--danger);
+}
+
+.map-error p {
+  margin: 6px 0 0;
+  color: #374151;
+}
+
 .time-controls {
   position: absolute;
   left: 16px;
