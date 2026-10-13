@@ -166,3 +166,9 @@ def test_detour_much_slower_than_fastest_is_dropped():
     client = FakeClient([raw_route(straight_line(ORIGIN, DEST), 1000)])  # detours take 5000 s
     result = plan_routes(client, ORIGIN, DEST, DEPARTURE, load_lb=0)
     assert len(result) == 1
+
+
+def test_simplify_drops_collinear_points_and_keeps_corners():
+    points = [(0, 0), (0, 1), (0, 2), (1, 2.01), (2, 2)]
+    assert geo.simplify(points, 0.05) == [0, 2, 4]
+    assert geo.simplify(points, 0.001) == [0, 2, 3, 4]

@@ -65,3 +65,36 @@ def offset_point(point, toward, ratio_along, offset_mi):
     x = dx * ratio_along + px * offset_mi
     y = dy * ratio_along + py * offset_mi
     return (lat0 + y / MILES_PER_DEG_LAT, lon0 + x / (MILES_PER_DEG_LAT * cos_lat))
+
+
+def simplify(points, tolerance_deg):
+    """Indices of the points kept by Ramer-Douglas-Peucker simplification.
+
+    Returns indices rather than points so callers can keep per-point data
+    (such as elapsed time) aligned with the simplified line.
+    """
+    n = len(points)
+    if n < 3:
+        return list(range(n))
+    keep = [False] * n
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        start, end = stack.pop()
+        (y1, x1), (y2, x2) = points[start], points[end]
+        dx, dy = x2 - x1, y2 - y1
+        norm = math.hypot(dx, dy)
+        max_dist, max_i = 0.0, None
+        for i in range(start + 1, end):
+            y, x = points[i]
+            if norm:
+                dist = abs(dy * (x - x1) - dx * (y - y1)) / norm
+            else:
+                dist = math.hypot(x - x1, y - y1)
+            if dist > max_dist:
+                max_dist, max_i = dist, i
+        if max_i is not None and max_dist > tolerance_deg:
+            keep[max_i] = True
+            stack.append((start, max_i))
+            stack.append((max_i, end))
+    return [i for i in range(n) if keep[i]]
