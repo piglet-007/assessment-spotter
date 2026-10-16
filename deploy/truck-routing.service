@@ -1,0 +1,25 @@
+# systemd unit for the Django API. deploy.sh fills in the @PLACEHOLDERS@.
+[Unit]
+Description=Weather-aware truck routing API (gunicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+WorkingDirectory=@APP_DIR@/backend
+# Requests mostly wait on HERE and Open-Meteo, so threads go further than processes.
+ExecStart=@APP_DIR@/backend/.venv/bin/gunicorn config.wsgi:application \
+    --bind 127.0.0.1:8000 --workers 2 --threads 4 --timeout 90 \
+    --access-logfile - --error-logfile -
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=@CACHE_DIR@
+
+[Install]
+WantedBy=multi-user.target

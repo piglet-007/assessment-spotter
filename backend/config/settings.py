@@ -13,9 +13,14 @@ def env_list(name, default=""):
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
 
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-insecure-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() == "true"
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-insecure-key" if DEBUG else "")
+if not SECRET_KEY:
+    raise RuntimeError("Set DJANGO_SECRET_KEY when DJANGO_DEBUG is false.")
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+
+# Behind nginx: trust its X-Forwarded-Proto so Django knows a request came in over HTTPS.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
@@ -42,11 +47,20 @@ DATABASES = {
     }
 }
 
-# Forecasts and routes are cached in memory; swap for Redis in production if needed.
+# Forecasts, routes and geocodes are cached. In development memory is enough; in
+# production set DJANGO_CACHE_DIR so every gunicorn worker shares one file cache
+# (which also keeps Open-Meteo usage inside its free-tier limits).
+CACHE_DIR = os.getenv("DJANGO_CACHE_DIR")
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "BACKEND": (
+            "django.core.cache.backends.filebased.FileBasedCache"
+            if CACHE_DIR
+            else "django.core.cache.backends.locmem.LocMemCache"
+        ),
+        "LOCATION": CACHE_DIR or "",
         "TIMEOUT": 3600,
+        "OPTIONS": {"MAX_ENTRIES": 20000},
     }
 }
 
