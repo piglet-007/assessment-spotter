@@ -10,10 +10,19 @@ browser ──► nginx (:8080, or :80/:443 with a domain) ──► /          
 The frontend calls `/api` on its own origin, so there is no CORS setup.
 `deploy.sh` installs and updates everything; run it again after every code change.
 
-It is written for servers that already host other apps: it only adds its own nginx site
-(`/etc/nginx/sites-available/truck-routing`), never edits or removes other sites, never replaces
-the system Node.js (it downloads a private copy into `.node/` if the system one is too old),
-and stops before changing anything if a port it needs is taken.
+### Safe alongside apps that are already running
+
+| Risk to existing apps | What the script does |
+| --- | --- |
+| Other nginx sites | Adds one site of its own (`zz-truck-routing`) and never edits, disables or removes others. Named to sort last, so it can never become the implicit default site for a port. |
+| nginx restarts | Only ever runs `systemctl reload nginx` (graceful), and only after `nginx -t` passes. If the test fails, its site is rolled back and nginx is not reloaded. |
+| An already-broken nginx config | Preflight stops if `nginx -t` fails before anything is changed. |
+| Package upgrades | Installs only missing packages, with `--no-upgrade`; installed nginx, Python etc. are left as they are. |
+| System Node.js | Never replaced; if it's older than 22, a checksum-verified private copy goes into `.node/` for the build. |
+| Port clashes | Stops if the public port, the internal gunicorn port or port 80 (if not nginx) belongs to something else. |
+| Domain clashes | Stops if another site already uses the same `server_name`. |
+| Memory / CPU | Stops if less than 700 MB RAM is free (warns below 1.2 GB); the build runs at low CPU priority (`nice`). |
+| Its own footprint | One systemd service (`truck-routing`), one system user (`truckroute`), `/var/cache/truck-routing`, and the app folder. |
 
 ## Requirements
 
@@ -93,7 +102,8 @@ sudo ./deploy/deploy.sh  # pass the same DOMAIN / PUBLIC_PORT / APP_PORT as the 
 ## Troubleshooting
 
 - **Page doesn't load at all:** open the port (8080, or 80/443 with a domain) in any firewall in front of the server.
-- **Remove the app:** `sudo systemctl disable --now truck-routing && sudo rm /etc/systemd/system/truck-routing.service /etc/nginx/sites-enabled/truck-routing /etc/nginx/sites-available/truck-routing && sudo systemctl reload nginx`
+- **Remove the app completely** (nothing else is touched):
+  `sudo systemctl disable --now truck-routing && sudo rm -f /etc/systemd/system/truck-routing.service /etc/nginx/sites-enabled/zz-truck-routing /etc/nginx/sites-available/zz-truck-routing /etc/nginx/conf.d/zz-truck-routing.conf && sudo nginx -t && sudo systemctl reload nginx && sudo rm -rf /var/cache/truck-routing /srv/truck-routing`
 - **`Bad Request (400)`:** the address in the browser is not in `DJANGO_ALLOWED_HOSTS` in `backend/.env`.
   Add it and run `sudo systemctl restart truck-routing`.
 - **`npm run build` is killed on a 1 GB server:** add swap, then re-run the script:

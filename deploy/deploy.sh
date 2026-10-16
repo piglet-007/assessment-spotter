@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Install or update the app on an Ubuntu 22.04/24.04 server. Safe to re-run after every update,
-# and written to share the server with other apps: it never edits other nginx sites, never
-# replaces the system Node.js, and refuses ports that something else already uses.
+# Install or update the app on an Ubuntu 22.04/24.04 server. Safe to re-run after every update.
 #
-#   sudo ./deploy/deploy.sh --check        # read-only preflight: what's installed, which ports are free
+# Written to share a server with apps that are already running. It:
+#   - adds one nginx site of its own and never edits, disables or removes other sites;
+#   - installs only missing packages and never upgrades installed ones (so nginx is not restarted);
+#   - uses a private Node.js for the build instead of replacing the system one;
+#   - checks ports, memory and the existing nginx config before changing anything;
+#   - rolls its nginx site back if the config test fails, and only ever *reloads* nginx;
+#   - runs the build at low CPU priority.
+#
+#   sudo ./deploy/deploy.sh --check        # read-only preflight: changes nothing
 #   sudo ./deploy/deploy.sh                # serve on http://SERVER_IP:8080 (no domain needed)
 #   sudo DOMAIN=routes.example.com EMAIL=you@example.com ./deploy/deploy.sh   # domain + HTTPS
 #
@@ -18,6 +24,8 @@ set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE=truck-routing
+# "zz-" sorts last, so this site never becomes nginx's implicit default for a port.
+SITE_NAME=zz-truck-routing
 SERVICE_USER=truckroute
 CACHE_DIR=/var/cache/truck-routing
 ENV_FILE="$APP_DIR/backend/.env"
@@ -27,6 +35,8 @@ EMAIL="${EMAIL:-}"
 PUBLIC_PORT="${PUBLIC_PORT:-8080}"
 APP_PORT="${APP_PORT:-8765}"
 MIN_NODE_MAJOR=22
+MIN_FREE_MB=700       # below this, the build could push other apps into the OOM killer
+COMFORT_FREE_MB=1200
 CHECK_ONLY=false
 [ "${1:-}" = "--check" ] && CHECK_ONLY=true
 
@@ -41,47 +51,105 @@ die() { printf '\n\033[31mError: %s\033[0m\n' "$*" >&2; exit 1; }
 port_owner() { ss -Hltnp "sport = :$1" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2 || true; }
 our_gunicorn_running() { systemctl is-active --quiet "$SERVICE" 2>/dev/null; }
 node_major() { "${1:-node}" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
+is_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
 
-# ---------------------------------------------------------------- preflight
+# Install only what is missing; --no-upgrade never touches packages other apps already use.
+install_missing() {
+  local missing=()
+  for pkg in "$@"; do is_installed "$pkg" || missing+=("$pkg"); done
+  [ ${#missing[@]} -eq 0 ] && return
+  echo "Installing: ${missing[*]}"
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-upgrade "${missing[@]}" >/dev/null
+}
+
+# Where this nginx keeps sites: Ubuntu's sites-available/enabled, or conf.d (nginx.org packages).
+SITE_FILE="" SITE_LINK=""
+locate_nginx_site() {
+  local config
+  config="$(nginx -T 2>/dev/null || true)"
+  if grep -q "include /etc/nginx/sites-enabled/" <<<"$config"; then
+    SITE_FILE="/etc/nginx/sites-available/$SITE_NAME"
+    SITE_LINK="/etc/nginx/sites-enabled/$SITE_NAME"
+  elif grep -q "include /etc/nginx/conf.d/\*.conf" <<<"$config"; then
+    SITE_FILE="/etc/nginx/conf.d/$SITE_NAME.conf"
+    SITE_LINK=""
+  else
+    die "nginx includes neither sites-enabled/ nor conf.d/; add the site from deploy/nginx.conf by hand."
+  fi
+}
+
+# Reads `nginx -T` output: does any config file other than $1 declare server_name $2?
+other_site_uses_domain() {
+  awk -v own="$1" -v domain="$2" '
+    /^# configuration file / { file = $4; sub(/:$/, "", file); next }
+    file != own && $1 == "server_name" {
+      for (i = 2; i <= NF; i++) { name = $i; sub(/;$/, "", name); if (name == domain) found = 1 }
+    }
+    END { exit !found }'
+}
+
+# ---------------------------------------------------------------- preflight (read-only)
 say "Preflight"
-. /etc/os-release && echo "OS:     $PRETTY_NAME"
-echo "Memory: $(free -m | awk '/^Mem:/ {print $7 " MB available of " $2 " MB"}')"
-echo "nginx:  $(command -v nginx >/dev/null && nginx -v 2>&1 | cut -d/ -f2 || echo 'not installed')"
-echo "node:   $(command -v node >/dev/null && node --version || echo 'not installed') (needs >= $MIN_NODE_MAJOR for the build; a private copy is used otherwise)"
-echo "python: $(python3 --version 2>&1 | cut -d' ' -f2)"
+. /etc/os-release && echo "OS:      $PRETTY_NAME"
+free_mb="$(free -m | awk '/^Mem:/ {print $7}')"
+echo "Memory:  $free_mb MB available of $(free -m | awk '/^Mem:/ {print $2}') MB"
+echo "nginx:   $(command -v nginx >/dev/null && nginx -v 2>&1 | cut -d/ -f2 || echo 'not installed (will be installed)')"
+echo "node:    $(command -v node >/dev/null && node --version || echo 'not installed') (build needs >= $MIN_NODE_MAJOR; a private copy is used otherwise)"
+echo "python:  $(python3 --version 2>&1 | cut -d' ' -f2)"
 for port in 80 443 "$PUBLIC_PORT" "$APP_PORT"; do
   owner="$(port_owner "$port")"
   echo "port $port: ${owner:-free}"
 done
-if [ -d /etc/nginx/sites-enabled ]; then
-  echo "nginx sites enabled: $(ls /etc/nginx/sites-enabled | tr '\n' ' ')"
-fi
+echo "running services: $(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | wc -l)"
 
 problems=()
+nginx_present=false
+command -v nginx >/dev/null && nginx_present=true
+
 web_owner="$(port_owner 80)"
 if [ -n "$web_owner" ] && [ "$web_owner" != "nginx" ]; then
   problems+=("port 80 is served by '$web_owner', not nginx; this script only configures nginx.")
 fi
+
+if $nginx_present; then
+  if ! nginx -t -q 2>/dev/null; then
+    problems+=("the existing nginx config already fails 'nginx -t'; fix that first (this script would not touch it).")
+  else
+    locate_nginx_site
+    echo "nginx sites: $(ls "$(dirname "${SITE_LINK:-$SITE_FILE}")" | tr '\n' ' ')"
+    echo "this app's site file: $SITE_FILE$( [ -f "$SITE_FILE" ] && echo ' (exists, will be updated)' || echo ' (new)')"
+  fi
+fi
+
 app_owner="$(port_owner "$APP_PORT")"
 if [ -n "$app_owner" ] && ! our_gunicorn_running; then
   problems+=("APP_PORT $APP_PORT is used by '$app_owner'; choose another, e.g. APP_PORT=8766.")
 fi
+
 if [ -z "$DOMAIN" ]; then
   public_owner="$(port_owner "$PUBLIC_PORT")"
-  if [ -n "$public_owner" ] && ! grep -qs "listen $PUBLIC_PORT;" "/etc/nginx/sites-enabled/$SERVICE"; then
+  if [ -n "$public_owner" ] && ! grep -qs "listen $PUBLIC_PORT;" "$SITE_FILE"; then
     problems+=("PUBLIC_PORT $PUBLIC_PORT is used by '$public_owner'; choose another, e.g. PUBLIC_PORT=8081.")
   fi
 else
   resolved="$(getent hosts "$DOMAIN" | awk '{print $1}' | head -1 || true)"
   echo "$DOMAIN resolves to: ${resolved:-nothing yet}"
   [ -n "$resolved" ] || problems+=("$DOMAIN does not resolve yet; add a DNS A record for it first.")
-  grep -Rqs "server_name[^;]*\b$DOMAIN\b" /etc/nginx/sites-enabled --exclude="$SERVICE" &&
+  if $nginx_present && nginx -T 2>/dev/null | other_site_uses_domain "${SITE_LINK:-$SITE_FILE}" "$DOMAIN"; then
     problems+=("another nginx site already uses server_name $DOMAIN.")
+  fi
+fi
+
+if [ "$free_mb" -lt "$MIN_FREE_MB" ]; then
+  problems+=("only $free_mb MB RAM available; the build needs ~${MIN_FREE_MB}+ MB and could starve the other apps. Add swap (see deploy/README.md).")
+elif [ "$free_mb" -lt "$COMFORT_FREE_MB" ]; then
+  warn "$free_mb MB RAM available; the build should fit, but adding swap is safer for the other apps."
 fi
 
 if [ ${#problems[@]} -gt 0 ]; then
   for p in "${problems[@]}"; do printf '\033[31m- %s\033[0m\n' "$p"; done
-  die "fix the problems above and run again."
+  die "fix the problems above and run again. Nothing was changed."
 fi
 echo "No conflicts found."
 if $CHECK_ONLY; then
@@ -90,10 +158,9 @@ if $CHECK_ONLY; then
 fi
 
 # ---------------------------------------------------------------- packages
-say "System packages"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq python3-venv python3-pip nginx curl ca-certificates xz-utils >/dev/null
+say "System packages (missing ones only)"
+install_missing python3-venv nginx curl ca-certificates xz-utils
+$nginx_present || locate_nginx_site
 
 NODE_BIN="$(command -v node || true)"
 if [ -z "$NODE_BIN" ] || [ "$(node_major "$NODE_BIN")" -lt "$MIN_NODE_MAJOR" ]; then
@@ -124,8 +191,8 @@ sudo -u "$SERVICE_USER" test -r "$APP_DIR/backend/manage.py" ||
 
 say "Backend"
 python3 -m venv "$APP_DIR/backend/.venv"
-"$APP_DIR/backend/.venv/bin/pip" install -q --upgrade pip
-"$APP_DIR/backend/.venv/bin/pip" install -q -r "$APP_DIR/backend/requirements.txt"
+nice -n 10 "$APP_DIR/backend/.venv/bin/pip" install -q --upgrade pip
+nice -n 10 "$APP_DIR/backend/.venv/bin/pip" install -q -r "$APP_DIR/backend/requirements.txt"
 
 if [ ! -f "$ENV_FILE" ]; then
   if [ -n "$DOMAIN" ]; then
@@ -154,12 +221,12 @@ grep -q '^DJANGO_DEBUG=false' "$ENV_FILE" || warn "DJANGO_DEBUG is not false in 
 (cd "$APP_DIR/backend" && .venv/bin/python manage.py check --deploy --fail-level ERROR >/dev/null)
 
 # ---------------------------------------------------------------- frontend
-say "Frontend"
+say "Frontend (low CPU priority)"
 (
   cd "$APP_DIR/frontend"
   export PATH="$(dirname "$NODE_BIN"):$PATH"
-  npm ci --no-audit --no-fund --loglevel=error
-  npm run build >/dev/null
+  nice -n 10 npm ci --no-audit --no-fund --loglevel=error
+  nice -n 10 npm run build >/dev/null
 )
 echo "Built $APP_DIR/frontend/dist"
 
@@ -170,9 +237,9 @@ sed -e "s|@APP_DIR@|$APP_DIR|g" -e "s|@SERVICE_USER@|$SERVICE_USER|g" \
   "$APP_DIR/deploy/truck-routing.service" >"/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null 2>&1
-systemctl restart "$SERVICE"
+systemctl restart "$SERVICE"  # this app's service only
 
-say "nginx site"
+say "nginx site ($SITE_FILE)"
 if [ -n "$DOMAIN" ]; then
   listen="listen 80;\n    listen [::]:80;"
   server_name="$DOMAIN"
@@ -180,30 +247,43 @@ else
   listen="listen $PUBLIC_PORT;\n    listen [::]:$PUBLIC_PORT;"
   server_name="_"
 fi
-site="/etc/nginx/sites-available/$SERVICE"
-# Keep certbot's HTTPS additions on re-runs: only rewrite the site if it isn't certified yet.
-if ! grep -qs "managed by Certbot" "$site"; then
-  sed -e "s|@APP_DIR@|$APP_DIR|g" -e "s|@SERVER_NAME@|$server_name|g" \
-    -e "s|@APP_PORT@|$APP_PORT|g" -e "s|@LISTEN@|$listen|g" \
-    "$APP_DIR/deploy/nginx.conf" >"$site"
-fi
-ln -sf "$site" "/etc/nginx/sites-enabled/$SERVICE"
 # nginx (www-data) must be able to read the built files.
 chmod o+rx "$APP_DIR" "$APP_DIR/frontend"
 chmod -R o+rX "$APP_DIR/frontend/dist"
-nginx -t 2>&1 | grep -v "syntax is ok\|test is successful" || true
-nginx -t -q || die "nginx config test failed; other sites were not touched. Remove $site to roll back."
-systemctl reload nginx
+
+backup=""
+[ -f "$SITE_FILE" ] && backup="$(mktemp)" && cp "$SITE_FILE" "$backup"
+# Keep certbot's HTTPS additions on re-runs: only rewrite the site if it isn't certified yet.
+if ! grep -qs "managed by Certbot" "$SITE_FILE"; then
+  sed -e "s|@APP_DIR@|$APP_DIR|g" -e "s|@SERVER_NAME@|$server_name|g" \
+    -e "s|@APP_PORT@|$APP_PORT|g" -e "s|@LISTEN@|$listen|g" \
+    "$APP_DIR/deploy/nginx.conf" >"$SITE_FILE"
+fi
+[ -n "$SITE_LINK" ] && ln -sf "$SITE_FILE" "$SITE_LINK"
+
+if ! nginx -t -q 2>/dev/null; then
+  nginx -t || true
+  # Roll back so the next reload (by anyone) still works for the other sites.
+  if [ -n "$backup" ]; then
+    cp "$backup" "$SITE_FILE"
+  else
+    rm -f "$SITE_FILE" ${SITE_LINK:+"$SITE_LINK"}
+  fi
+  die "nginx rejected this app's site; it was rolled back and nginx was not reloaded."
+fi
+rm -f "$backup"
+systemctl reload nginx  # graceful: existing connections and other sites keep running
 
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   if [ -n "$DOMAIN" ]; then ufw allow 'Nginx Full' >/dev/null; else ufw allow "$PUBLIC_PORT/tcp" >/dev/null; fi
 fi
 
-if [ -n "$DOMAIN" ] && ! grep -qs "managed by Certbot" "$site"; then
+if [ -n "$DOMAIN" ] && ! grep -qs "managed by Certbot" "$SITE_FILE"; then
   say "HTTPS certificate for $DOMAIN"
-  apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
+  install_missing certbot python3-certbot-nginx
   email_args=(--register-unsafely-without-email)
   [ -n "$EMAIL" ] && email_args=(-m "$EMAIL")
+  # Only edits the server block whose server_name is $DOMAIN, i.e. this app's site.
   certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect "${email_args[@]}"
 fi
 
