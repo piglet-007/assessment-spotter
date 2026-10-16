@@ -194,13 +194,13 @@ python3 -m venv "$APP_DIR/backend/.venv"
 nice -n 10 "$APP_DIR/backend/.venv/bin/pip" install -q --upgrade pip
 nice -n 10 "$APP_DIR/backend/.venv/bin/pip" install -q -r "$APP_DIR/backend/requirements.txt"
 
+if [ -n "$DOMAIN" ]; then
+  host="$DOMAIN"
+else
+  # Behind NAT the public IP is not on any interface, so ask an echo service.
+  host="${PUBLIC_HOST:-$(curl -fsS --max-time 5 https://api.ipify.org || hostname -I | awk '{print $1}')}"
+fi
 if [ ! -f "$ENV_FILE" ]; then
-  if [ -n "$DOMAIN" ]; then
-    host="$DOMAIN"
-  else
-    # Behind NAT the public IP is not on any interface, so ask an echo service.
-    host="${PUBLIC_HOST:-$(curl -fsS --max-time 5 https://api.ipify.org || hostname -I | awk '{print $1}')}"
-  fi
   cat >"$ENV_FILE" <<EOF
 DJANGO_DEBUG=false
 DJANGO_SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(50))')
@@ -209,15 +209,20 @@ DJANGO_CACHE_DIR=$CACHE_DIR
 HERE_API_KEY=${HERE_API_KEY:-}
 EOF
   echo "Wrote $ENV_FILE (allowed host: $host)"
-elif [ -n "$DOMAIN" ] && ! grep -q "^DJANGO_ALLOWED_HOSTS=.*\b$DOMAIN\b" "$ENV_FILE"; then
-  sed -i "s|^DJANGO_ALLOWED_HOSTS=|DJANGO_ALLOWED_HOSTS=$DOMAIN,|" "$ENV_FILE"
-  echo "Added $DOMAIN to DJANGO_ALLOWED_HOSTS"
+elif ! grep -Eq "^DJANGO_ALLOWED_HOSTS=(.*,)?$host(,|$)" "$ENV_FILE"; then
+  # Otherwise Django rejects every request for this address with 400 DisallowedHost.
+  sed -i "s|^DJANGO_ALLOWED_HOSTS=|DJANGO_ALLOWED_HOSTS=$host,|" "$ENV_FILE"
+  echo "Added $host to DJANGO_ALLOWED_HOSTS"
 fi
 chown "root:$SERVICE_USER" "$ENV_FILE"
 chmod 640 "$ENV_FILE"
 grep -q '^HERE_API_KEY=.\+' "$ENV_FILE" ||
   die "set HERE_API_KEY in $ENV_FILE, then run this script again."
-grep -q '^DJANGO_DEBUG=false' "$ENV_FILE" || warn "DJANGO_DEBUG is not false in $ENV_FILE."
+# A copied development .env would expose Django's debug pages to the internet.
+grep -q '^DJANGO_DEBUG=false' "$ENV_FILE" ||
+  die "$ENV_FILE does not set DJANGO_DEBUG=false (is it a copy of a development .env?). Move it aside and re-run to generate a production one."
+grep -Eq '^DJANGO_SECRET_KEY=.{40,}' "$ENV_FILE" ||
+  die "$ENV_FILE needs a long random DJANGO_SECRET_KEY. Move it aside and re-run to generate one."
 (cd "$APP_DIR/backend" && .venv/bin/python manage.py check --deploy --fail-level ERROR >/dev/null)
 
 # ---------------------------------------------------------------- frontend

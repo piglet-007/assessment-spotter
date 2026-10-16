@@ -5,7 +5,7 @@ routes, checks the forecast at the time the truck will actually reach each point
 classifies the risk with the given wind/rain/snow and load rules, and recommends a route that
 balances weather risk against travel time.
 
-**Live demo:** http://YOUR_SERVER_IP:8080
+**Live demo:** http://144.172.91.81:8080
 
 ![Dallas to Denver: three routes with summary cards, risk-coloured checkpoints, wind heatmap at +6 h](docs/screenshot.png)
 
