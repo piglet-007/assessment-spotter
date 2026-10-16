@@ -1,14 +1,19 @@
 # Deploying to a VPS
 
-One Ubuntu server runs everything:
+One Ubuntu server runs everything, alongside any apps already on it:
 
 ```
-browser ──► nginx :80/:443 ──► /            React build (frontend/dist)
-                           └─► /api/...    gunicorn :8000 (Django)
+browser ──► nginx (:8080, or :80/:443 with a domain) ──► /          React build (frontend/dist)
+                                                     └─► /api/...  gunicorn on 127.0.0.1:8765 (Django)
 ```
 
 The frontend calls `/api` on its own origin, so there is no CORS setup.
 `deploy.sh` installs and updates everything; run it again after every code change.
+
+It is written for servers that already host other apps: it only adds its own nginx site
+(`/etc/nginx/sites-available/truck-routing`), never edits or removes other sites, never replaces
+the system Node.js (it downloads a private copy into `.node/` if the system one is too old),
+and stops before changing anything if a port it needs is taken.
 
 ## Requirements
 
@@ -35,35 +40,44 @@ rsync -av --exclude .git --exclude node_modules --exclude .venv --exclude dist -
   ./ user@SERVER_IP:/srv/truck-routing/
 ```
 
-## 2. Deploy
+## 2. Preflight (changes nothing)
 
 ```bash
 cd /srv/truck-routing
+sudo ./deploy/deploy.sh --check
+```
+
+Shows the OS, free memory, nginx/Node/Python versions, which ports are taken and by what,
+and the enabled nginx sites. Pick other ports if it reports a conflict:
+`PUBLIC_PORT=8081` (the site) or `APP_PORT=8766` (internal gunicorn).
+
+## 3. Deploy
+
+**Without a domain** (site on port 8080):
+
+```bash
 sudo HERE_API_KEY=your-here-key ./deploy/deploy.sh
 ```
 
-It installs Python, Node 22 and nginx, creates `backend/.env` with a random secret key,
-builds the frontend, starts the `truck-routing` service and configures nginx.
-When it finishes it prints the URL, e.g. `http://203.0.113.10`.
+**With a (sub)domain** (shares ports 80/443 with your other sites, gets HTTPS):
 
-## 3. Optional: domain and HTTPS
-
-1. At your DNS provider, add an **A record** for the domain pointing to the server's IP.
-2. Once it resolves (`ping routes.example.com`), run:
+1. At your DNS provider, add an **A record** for e.g. `routes.example.com` pointing to the server's IP.
+2. Once it resolves (`getent hosts routes.example.com`), run:
 
    ```bash
-   sudo nano backend/.env    # add the domain to DJANGO_ALLOWED_HOSTS, comma separated
-   sudo DOMAIN=routes.example.com EMAIL=you@example.com ./deploy/deploy.sh
+   sudo HERE_API_KEY=your-here-key DOMAIN=routes.example.com EMAIL=you@example.com ./deploy/deploy.sh
    ```
 
-certbot gets a free certificate, redirects HTTP to HTTPS and renews automatically.
+It installs what's missing (Python venv, nginx), creates `backend/.env` with a random secret key,
+builds the frontend, starts the `truck-routing` service, adds the nginx site and, with a domain,
+gets a free certificate that renews automatically. It ends by printing the URL.
 
 ## Updating
 
 ```bash
 cd /srv/truck-routing
 sudo git pull            # or rsync again from your machine
-sudo ./deploy/deploy.sh  # add DOMAIN=... if you use one
+sudo ./deploy/deploy.sh  # pass the same DOMAIN / PUBLIC_PORT / APP_PORT as the first time
 ```
 
 ## Operating
@@ -78,7 +92,8 @@ sudo ./deploy/deploy.sh  # add DOMAIN=... if you use one
 
 ## Troubleshooting
 
-- **Page doesn't load at all:** open ports 80/443 in the cloud provider's firewall.
+- **Page doesn't load at all:** open the port (8080, or 80/443 with a domain) in any firewall in front of the server.
+- **Remove the app:** `sudo systemctl disable --now truck-routing && sudo rm /etc/systemd/system/truck-routing.service /etc/nginx/sites-enabled/truck-routing /etc/nginx/sites-available/truck-routing && sudo systemctl reload nginx`
 - **`Bad Request (400)`:** the address in the browser is not in `DJANGO_ALLOWED_HOSTS` in `backend/.env`.
   Add it and run `sudo systemctl restart truck-routing`.
 - **`npm run build` is killed on a 1 GB server:** add swap, then re-run the script:

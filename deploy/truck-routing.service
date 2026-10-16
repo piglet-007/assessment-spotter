@@ -10,7 +10,7 @@ Group=@SERVICE_USER@
 WorkingDirectory=@APP_DIR@/backend
 # Requests mostly wait on HERE and Open-Meteo, so threads go further than processes.
 ExecStart=@APP_DIR@/backend/.venv/bin/gunicorn config.wsgi:application \
-    --bind 127.0.0.1:8000 --workers 2 --threads 4 --timeout 90 \
+    --bind 127.0.0.1:@APP_PORT@ --workers 2 --threads 4 --timeout 90 \
     --access-logfile - --error-logfile -
 Restart=on-failure
 RestartSec=3
