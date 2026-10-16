@@ -18,7 +18,7 @@ and stops before changing anything if a port it needs is taken.
 ## Requirements
 
 - Ubuntu 22.04 or 24.04, at least 1 GB RAM (the frontend build needs it; see Troubleshooting).
-- Ports 80 and 443 open in the provider's firewall (on GCP/AWS this is a separate "firewall rule" / "security group").
+- The site's port reachable from outside: 8080 by default, or 80/443 with a domain.
 - A HERE API key.
 - Optional: a domain name, for HTTPS.
 
@@ -36,7 +36,7 @@ sudo git clone https://github.com/<you>/<repo>.git /srv/truck-routing
 
 ```bash
 ssh user@SERVER_IP 'sudo mkdir -p /srv/truck-routing && sudo chown $USER /srv/truck-routing'
-rsync -av --exclude .git --exclude node_modules --exclude .venv --exclude dist --exclude .env \
+rsync -av --exclude .git --exclude node_modules --exclude .venv --exclude .node --exclude dist --exclude .env \
   ./ user@SERVER_IP:/srv/truck-routing/
 ```
 
