@@ -576,6 +576,97 @@ button.primary:disabled {
   }
 }
 
+/* ---- route summary labels on the map ---- */
+
+.route-label {
+  display: block;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgb(255 255 255 / 95%);
+  box-shadow: 0 2px 8px rgb(16 24 40 / 18%);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: 0.88;
+  transition: opacity 0.15s, box-shadow 0.15s;
+}
+
+.route-label:hover,
+.route-label.selected {
+  opacity: 1;
+  box-shadow: 0 0 0 2px var(--accent), 0 4px 12px rgb(16 24 40 / 22%);
+}
+
+.rl-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rl-id {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.rl-muted {
+  color: var(--muted);
+}
+
+.rl-best {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-weight: 700;
+  font-size: 10px;
+}
+
+.rl-risk {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  color: #374151;
+}
+
+.rl-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+/* ---- checkpoint hover tooltip ---- */
+
+.cp-hover .maplibregl-popup-content {
+  padding: 5px 9px;
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.cp-hover-body {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.cp-hover-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
 /* ---- checkpoint popup ---- */
 
 .maplibregl-popup-content {

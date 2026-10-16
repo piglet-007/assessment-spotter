@@ -4,10 +4,10 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import type { Feature, FeatureCollection, LineString, Point } from 'geojson'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { escapeHtml, formatTime } from '../lib/format'
-import { cumulativeMiles, lngLatAt, slice } from '../lib/geo'
+import { escapeHtml, formatDuration, formatMiles, formatTime } from '../lib/format'
+import { cumulativeMiles, haversineMi, lngLatAt, slice } from '../lib/geo'
 import { LEVEL_COLORS, METRICS, heatmapColorRamp, routeColor } from '../lib/risk'
-import type { Checkpoint, Heatmap, HeatmapMetric, Plan } from '../types'
+import type { Checkpoint, Heatmap, HeatmapMetric, Plan, PlannedRoute } from '../types'
 
 // MapLibre locates its worker relative to its own module, which Vite's bundling
 // breaks; serve the worker as an asset and point MapLibre at it instead.
@@ -173,6 +173,63 @@ function popupHtml(routeId: string, cp: Checkpoint): string {
   </div>`
 }
 
+/** One-line checkpoint summary shown on hover. */
+function hoverHtml(routeId: string, cp: Checkpoint): string {
+  const color = LEVEL_COLORS[cp.level]
+  return `<div class="cp-hover-body">
+    <span class="cp-hover-dot" style="background:${color}"></span>
+    <b>${escapeHtml(routeId)} · mi ${Math.round(cp.mile)}</b>
+    <span>ETA ${escapeHtml(formatTime(cp.eta))}</span>
+    <b style="color:${color}">${escapeHtml(cp.level)}</b>
+  </div>`
+}
+
+/** Route summary card placed on the map. */
+function routeLabelHtml(route: PlannedRoute, color: string): string {
+  const { miles_by_level: miles, max_level: worst } = route.summary
+  const severe = miles.Severe + miles['No Travel']
+  const worstColor = worst ? LEVEL_COLORS[worst] : LEVEL_COLORS.Unknown
+  return `<div class="rl-head">
+      <span class="rl-id" style="background:${color}">${escapeHtml(route.id)}</span>
+      <b>${escapeHtml(formatDuration(route.duration_s))}</b>
+      <span class="rl-muted">${escapeHtml(formatMiles(route.distance_mi))}</span>
+      ${route.recommended ? '<span class="rl-best">Best</span>' : ''}
+    </div>
+    <div class="rl-risk">
+      <span class="rl-dot" style="background:${worstColor}"></span>
+      worst ${escapeHtml(worst ?? 'Unknown')} · Severe+ ${Math.round(severe)} mi · High ${Math.round(miles.High)} mi
+    </div>`
+}
+
+/**
+ * Where to pin each route's label: the point 20-80% along the route that is
+ * farthest from the other routes, so labels sit on their own line and don't stack.
+ */
+function labelAnchors(plan: Plan): Coords[] {
+  const samples = plan.routes.map((route) => {
+    const step = Math.max(1, Math.floor(route.geometry.length / 80))
+    return route.geometry.filter((_, i) => i % step === 0)
+  })
+  return samples.map((own, r) => {
+    let best = own[Math.floor(own.length / 2)]
+    if (samples.length > 1) {
+      let bestDistance = -1
+      for (let i = Math.floor(own.length * 0.2); i < Math.ceil(own.length * 0.8); i++) {
+        const [lat, lon] = own[i]
+        let nearest = Infinity
+        samples.forEach((other, o) => {
+          if (o !== r) for (const [oLat, oLon] of other) nearest = Math.min(nearest, haversineMi(lat, lon, oLat, oLon))
+        })
+        if (nearest > bestDistance) {
+          bestDistance = nearest
+          best = own[i]
+        }
+      }
+    }
+    return [best[1], best[0]]
+  })
+}
+
 function addLayers(map: maplibregl.Map) {
   for (const id of ['heat', 'routes', 'risk', 'checkpoints', 'endpoints', 'trucks']) {
     map.addSource(id, { type: 'geojson', data: EMPTY })
@@ -276,6 +333,7 @@ export default function MapView({ plan, selectedId, onSelectRoute, focus, heatma
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const popupRef = useRef<maplibregl.Popup | null>(null)
+  const labelsRef = useRef<{ id: string; marker: maplibregl.Marker }[]>([])
   const showPopupRef = useRef<(routeId: string, index: number, at: maplibregl.LngLatLike) => void>(() => {})
   const [ready, setReady] = useState(false)
   const [mapError, setMapError] = useState<string | null>(() => (hasWebGL2() ? null : NO_WEBGL_MESSAGE))
@@ -320,9 +378,30 @@ export default function MapView({ plan, selectedId, onSelectRoute, focus, heatma
       setReady(true)
     })
 
+    // Hovering a checkpoint shows its ETA and level at a glance; clicking opens the details.
+    const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10, className: 'cp-hover' })
+    let hoveredKey = ''
+    map.on('mousemove', 'checkpoints', (event) => {
+      const feature = event.features?.[0]
+      if (!feature) return
+      const { routeId, index } = feature.properties as { routeId: string; index: number }
+      const key = `${routeId}:${index}`
+      if (key === hoveredKey) return
+      const cp = planRef.current?.routes.find((r) => r.id === routeId)?.checkpoints[index]
+      if (!cp) return
+      hoveredKey = key
+      hoverPopup.setLngLat((feature.geometry as Point).coordinates as Coords).setHTML(hoverHtml(routeId, cp)).addTo(map)
+    })
+    map.on('mouseleave', 'checkpoints', () => {
+      hoveredKey = ''
+      hoverPopup.remove()
+    })
+
     const showPopup = (showPopupRef.current = (routeId, index, lngLat) => {
       const cp = planRef.current?.routes.find((r) => r.id === routeId)?.checkpoints[index]
       if (!cp) return
+      hoveredKey = ''
+      hoverPopup.remove()
       popupRef.current?.remove()
       popupRef.current = new maplibregl.Popup({ maxWidth: '280px', offset: 8 })
         .setLngLat(lngLat)
@@ -369,6 +448,40 @@ export default function MapView({ plan, selectedId, onSelectRoute, focus, heatma
     for (const route of plan.routes) for (const [lat, lon] of route.geometry) bounds.extend([lon, lat])
     map.fitBounds(bounds, { padding: { top: 60, bottom: 150, left: 50, right: 60 }, duration: 900 })
   }, [ready, plan, planLayers])
+
+  // Route summary cards pinned to each route; clicking one selects that route.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !ready || !plan) return
+    const anchors = labelAnchors(plan)
+    const labels = plan.routes.map((route, i) => {
+      const element = document.createElement('button')
+      element.type = 'button'
+      element.className = 'route-label'
+      element.setAttribute('aria-label', `Select route ${route.id}`)
+      element.innerHTML = routeLabelHtml(route, routeColor(i))
+      element.addEventListener('click', (event) => {
+        event.stopPropagation()
+        onSelectRef.current(route.id)
+      })
+      const marker = new maplibregl.Marker({ element, anchor: 'bottom', offset: [0, -8] }).setLngLat(anchors[i]).addTo(map)
+      return { id: route.id, marker }
+    })
+    labelsRef.current = labels
+    return () => {
+      for (const { marker } of labels) marker.remove()
+      labelsRef.current = []
+    }
+  }, [ready, plan])
+
+  useEffect(() => {
+    for (const { id, marker } of labelsRef.current) {
+      const element = marker.getElement()
+      const selected = id === selectedId
+      element.classList.toggle('selected', selected)
+      element.style.zIndex = selected ? '2' : '1'
+    }
+  }, [selectedId, plan, ready])
 
   // Selected route: draw it on top, risk-coloured, with prominent checkpoints.
   useEffect(() => {
